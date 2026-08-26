@@ -1,0 +1,86 @@
+name: Parliament Crawler
+
+on:
+  workflow_dispatch:
+    inputs:
+      sprs_dates:
+        description: "SPRS dates separated by spaces (DD-MM-YYYY)"
+        required: false
+        default: "08-04-2026 04-03-2026 04-02-2026"
+  schedule:
+    - cron: "0 1 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Validate crawler
+        run: python -m py_compile crawler.py
+
+      - name: Run crawler
+        id: crawler
+        continue-on-error: true
+        env:
+          CONTACT: ${{ secrets.CRAWLER_CONTACT }}
+          INPUT_DATES: ${{ github.event.inputs.sprs_dates }}
+        run: |
+          mkdir -p crawler_output
+          CONTACT="${CONTACT:-${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/issues}"
+          DATES="${INPUT_DATES:-08-04-2026 04-03-2026 04-02-2026}"
+          set +e
+          python crawler.py \
+            --source all \
+            --sprs-dates ${DATES} \
+            --output-dir crawler_output \
+            --user-agent "ParliamentResearchCrawler/1.0 (contact: ${CONTACT})" \
+            > crawler_output/stdout.log \
+            2> crawler_output/stderr.log
+          RC=$?
+          echo "exit_code=${RC}" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Show results
+        if: always()
+        run: |
+          cat crawler_output/crawl_summary.json 2>/dev/null || true
+          cat crawler_output/crawl_status.csv 2>/dev/null || true
+          cat crawler_output/stderr.log 2>/dev/null || true
+
+      - name: Upload outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crawler-output-${{ github.run_number }}
+          path: crawler_output/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Verify data
+        if: always()
+        env:
+          EXIT_CODE: ${{ steps.crawler.outputs.exit_code }}
+        run: |
+          if [ "${EXIT_CODE}" != "0" ]; then
+            echo "::error::No usable data retrieved. Download the artifact and inspect crawl_status.csv."
+            exit 1
+          fi
